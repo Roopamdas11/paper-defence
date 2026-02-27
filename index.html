@@ -77,7 +77,7 @@
   <div class="overlay-title">Paper-Cut<br>Defense</div>
   <div class="overlay-sub">
         <b>Drag</b> anywhere to move (shard leads your thumb)<br>
-    <b>Left joystick</b> aims · <b>Right pad</b> fires (tap = instant)<br>
+    <b>Left joystick</b> aims & fires (tap/hold)<br>
     <b>Pulse</b> button · Right-click to push enemies
   
   </div>
@@ -169,8 +169,8 @@ let shake = {x:0,y:0,t:0};
 let tower = {hp:100,maxHp:100,radius:28,regenTimer:0,hitFlash:0};
 
 // ── SHARD ───────────────────────────────────────────────────────────────────
-// Movement: drag on the playfield. Shard "leads" your thumb slightly so it doesn't sit under it.
-// Aim: left joystick. Fire: right pad ("drawstring").
+// Movement: drag on the playfield. Shard "leads" your thumb so it stays visible.
+// Aim + Fire: left joystick (tap = instant, hold = rapid).
 let shard = {
   x:0, y:0, vx:0, vy:0,
   targetX:0, targetY:0, isDragged:false,
@@ -204,20 +204,17 @@ const EDEFS = {
 
 // ── ON-SCREEN CONTROLS (JOYSTICK + FIRE PAD) ────────────────────────────────
 const controls = {
-  aim: {x:0,y:0,r:62, active:false, pid:null, dx:0, dy:0},
-  fire:{x:0,y:0,r:68, active:false, pid:null, held:false, tapQueued:false},
-  // shard movement drag (anywhere not on aim/fire/pulse/pause)
+  // Aim + fire joystick (left-bottom)
+  aim: {x:0,y:0,r:64, active:false, pid:null, dx:0, dy:0},
+  // Shard movement drag (anywhere not on joystick/buttons)
   move:{active:false, pid:null, lastX:0, lastY:0, dirX:1, dirY:0}
 };
 
 function layoutControls(){
-  // Keep pads away from edges + safe with small screens
-  const pad = 24;
+  // Keep joystick away from edges + safe with small screens
+  const pad = 26;
   controls.aim.x = pad + controls.aim.r;
   controls.aim.y = H - pad - controls.aim.r;
-
-  controls.fire.x = W - pad - controls.fire.r;
-  controls.fire.y = H - pad - controls.fire.r;
 }
 layoutControls();
 window.addEventListener('resize', layoutControls);
@@ -245,23 +242,15 @@ function onPD(e) {
 
   const x=e.clientX, y=e.clientY;
 
-  // Aim joystick (left-bottom)
+  // Aim joystick (left-bottom) — also acts as the drawstring/fire control
   if (!controls.aim.active && inCircle(x,y,controls.aim.x,controls.aim.y,controls.aim.r*1.15)) {
     controls.aim.active = true;
     controls.aim.pid = e.pointerId;
     controls.aim.dx = 0; controls.aim.dy = 0;
     shard.aimLocked = true;
-    return;
-  }
-
-  // Fire pad (right-bottom)
-  if (!controls.fire.active && inCircle(x,y,controls.fire.x,controls.fire.y,controls.fire.r*1.15)) {
-    controls.fire.active = true;
-    controls.fire.pid = e.pointerId;
-    controls.fire.held = true;
-    // Tap fires immediately (as fast as you click)
+    // Tap fires immediately (as fast as you tap)
     manualFireImmediate();
-    // Holding keeps firing (faster than auto-fire)
+    // Holding keeps firing rapidly
     shard.fireCooldown = 0;
     return;
   }
@@ -308,13 +297,6 @@ function onPM(e) {
     return;
   }
 
-  // Fire pad hold (no move needed)
-  if (controls.fire.active && e.pointerId === controls.fire.pid) {
-    // Allow slight drift while still holding (if finger slips)
-    const inside = inCircle(x,y,controls.fire.x,controls.fire.y,controls.fire.r*1.35);
-    controls.fire.held = inside;
-    return;
-  }
 
   // Movement drag update
   if (controls.move.active && e.pointerId === controls.move.pid) {
@@ -342,13 +324,6 @@ function onPU(e) {
     controls.aim.pid = null;
     controls.aim.dx = 0; controls.aim.dy = 0;
   }
-
-  if (controls.fire.active && e.pointerId === controls.fire.pid) {
-    controls.fire.active = false;
-    controls.fire.pid = null;
-    controls.fire.held = false;
-  }
-
   if (controls.move.active && e.pointerId === controls.move.pid) {
     controls.move.active = false;
     controls.move.pid = null;
@@ -385,7 +360,7 @@ document.body.appendChild(pauseBtn);
 function setShardTargetWithLead(px,py,dirX,dirY){
   // Put shard slightly ahead of your thumb so the shard stays visible.
   // Lead distance adapts a bit with screen size, clamped for consistency.
-  const lead = clamp(Math.min(W,H)*0.06, 22, 46);
+  const lead = clamp(Math.min(W,H)*0.085, 34, 76);
 
   // If direction is tiny, keep last known direction.
   let lx = dirX, ly = dirY;
@@ -489,7 +464,6 @@ function startGame(){
   shard.isDragged=false;
 
   controls.aim.active=false; controls.aim.pid=null; controls.aim.dx=0; controls.aim.dy=0;
-  controls.fire.active=false; controls.fire.pid=null; controls.fire.held=false;
   controls.move.active=false; controls.move.pid=null;
 
   upg={fireRate:1,dartSpeed:1,knockback:1,pulseCdMult:1,
@@ -595,7 +569,7 @@ function update(dt){
   // 2) Otherwise: default auto-fire (forgiving, won't require holding).
   shard.fireCooldown-=dt;
 
-  const holdingFire = controls.fire.held && controls.fire.active;
+  const holdingFire = controls.aim.active;
 
   if(shard.fireCooldown<=0){
     if(holdingFire){
@@ -859,23 +833,11 @@ function drawControls(){
   // Only in PLAY; keep subtle so it doesn't clutter desktop.
   if(state!==S.PLAY) return;
 
-  // Aim joystick base
-  drawPad(controls.aim.x, controls.aim.y, controls.aim.r, 'Aim');
+  // Aim + Fire joystick base
+  drawPad(controls.aim.x, controls.aim.y, controls.aim.r, 'Aim / Fire');
   const kx = controls.aim.x + controls.aim.dx;
   const ky = controls.aim.y + controls.aim.dy;
   drawKnob(kx, ky, controls.aim.r*0.36);
-
-  // Fire pad base
-  drawPad(controls.fire.x, controls.fire.y, controls.fire.r, 'Fire');
-  // A little "string" notch
-  ctx.save();
-  ctx.globalAlpha = controls.fire.held ? 0.85 : 0.55;
-  ctx.strokeStyle = 'rgba(42,32,22,0.55)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(controls.fire.x, controls.fire.y, controls.fire.r*0.55, -0.45, 0.45);
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawPad(x,y,r,label){
@@ -952,12 +914,18 @@ function drawShardAt(x,y,angle,alpha){
   ctx.translate(x,y); ctx.rotate(angle);
   const r=shard.radius;
   ctx.save(); ctx.translate(2,3); ctx.fillStyle='rgba(42,32,22,0.22)';
-  ctx.beginPath(); ctx.moveTo(0,-r*1.4); ctx.lineTo(r,0); ctx.lineTo(0,r*1.4); ctx.lineTo(-r,0); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(0,-r*1.85); ctx.lineTo(r*1.05,-r*0.25); ctx.lineTo(r*0.72,r*0.95); ctx.lineTo(0,r*1.15); ctx.lineTo(-r*0.72,r*0.95); ctx.lineTo(-r*1.05,-r*0.25); ctx.closePath(); ctx.fill();
   ctx.restore();
   ctx.fillStyle='#2a2016';
   ctx.beginPath();
-  ctx.moveTo(0,-r*1.4); ctx.lineTo(r*0.75,-r*0.3); ctx.lineTo(r,0);
-  ctx.lineTo(0,r*1.4); ctx.lineTo(-r,0); ctx.closePath(); ctx.fill();
+  // Pointy front (darts exit here), wider shoulders, slightly flatter tail
+  ctx.moveTo(0,-r*1.85);
+  ctx.lineTo(r*1.05,-r*0.25);
+  ctx.lineTo(r*0.72,r*0.95);
+  ctx.lineTo(0,r*1.15);
+  ctx.lineTo(-r*0.72,r*0.95);
+  ctx.lineTo(-r*1.05,-r*0.25);
+  ctx.closePath(); ctx.fill();
   ctx.strokeStyle='rgba(255,245,225,0.5)'; ctx.lineWidth=1; ctx.stroke();
   ctx.strokeStyle='#c8b89a'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.moveTo(-r*0.3,-r*0.7); ctx.lineTo(r*0.3,r*0.7); ctx.stroke();
