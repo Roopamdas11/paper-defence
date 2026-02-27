@@ -76,9 +76,10 @@
 <div id="overlay">
   <div class="overlay-title">Paper-Cut<br>Defense</div>
   <div class="overlay-sub">
-    <b>Drag</b> anywhere to move your shard<br>
-    <b>Swipe</b> to set the dart firing angle<br>
+        <b>Drag</b> anywhere to move (shard leads your thumb)<br>
+    <b>Left joystick</b> aims · <b>Right pad</b> fires (tap = instant)<br>
     <b>Pulse</b> button · Right-click to push enemies
+  
   </div>
   <button class="big-btn" id="play-btn">Play</button>
 </div>
@@ -95,6 +96,7 @@
 </div>
 
 <script>
+
 'use strict';
 
 // ── CANVAS SETUP ────────────────────────────────────────────────────────────
@@ -167,13 +169,13 @@ let shake = {x:0,y:0,t:0};
 let tower = {hp:100,maxHp:100,radius:28,regenTimer:0,hitFlash:0};
 
 // ── SHARD ───────────────────────────────────────────────────────────────────
-// Free 2D movement. Drag to position; swipe direction sets aim angle.
+// Movement: drag on the playfield. Shard "leads" your thumb slightly so it doesn't sit under it.
+// Aim: left joystick. Fire: right pad ("drawstring").
 let shard = {
   x:0, y:0, vx:0, vy:0,
   targetX:0, targetY:0, isDragged:false,
-  aimAngle: -Math.PI/2,  // direction darts fire
-  aimLocked: false,       // has player manually aimed?
-  aimInputX:0, aimInputY:0, // swipe delta for aim
+  aimAngle: -Math.PI/2,
+  aimLocked: false,
   fireCooldown:0, fireRate:0.55,
   radius:14, rotation:0,
 };
@@ -200,9 +202,33 @@ const EDEFS = {
   leech:   {color:'#c0862a',radius:9, hp:3, speed:55,reward:8, shape:'diamond',extraDmg:2}
 };
 
+// ── ON-SCREEN CONTROLS (JOYSTICK + FIRE PAD) ────────────────────────────────
+const controls = {
+  aim: {x:0,y:0,r:62, active:false, pid:null, dx:0, dy:0},
+  fire:{x:0,y:0,r:68, active:false, pid:null, held:false, tapQueued:false},
+  // shard movement drag (anywhere not on aim/fire/pulse/pause)
+  move:{active:false, pid:null, lastX:0, lastY:0, dirX:1, dirY:0}
+};
+
+function layoutControls(){
+  // Keep pads away from edges + safe with small screens
+  const pad = 24;
+  controls.aim.x = pad + controls.aim.r;
+  controls.aim.y = H - pad - controls.aim.r;
+
+  controls.fire.x = W - pad - controls.fire.r;
+  controls.fire.y = H - pad - controls.fire.r;
+}
+layoutControls();
+window.addEventListener('resize', layoutControls);
+
+function inCircle(px,py,cx,cy,r){
+  const dx=px-cx, dy=py-cy;
+  return dx*dx+dy*dy <= r*r;
+}
+
 // ── INPUT ───────────────────────────────────────────────────────────────────
-let ptrs = {};
-let dragPtrId = null;
+const ptrs = {};
 
 canvas.addEventListener('pointerdown', onPD, {passive:false});
 canvas.addEventListener('pointermove', onPM, {passive:false});
@@ -213,43 +239,121 @@ canvas.addEventListener('contextmenu', e=>{e.preventDefault(); triggerPulse();})
 function onPD(e) {
   e.preventDefault();
   try{ getAC(); }catch(err){}
-  ptrs[e.pointerId] = {x:e.clientX, y:e.clientY, t:performance.now(), sx:e.clientX, sy:e.clientY};
-  if (Object.keys(ptrs).length >= 2) { triggerPulse(); return; }
+  ptrs[e.pointerId] = {x:e.clientX, y:e.clientY, sx:e.clientX, sy:e.clientY, t:performance.now()};
+
   if (state !== S.PLAY) return;
-  dragPtrId = e.pointerId;
-  shard.isDragged = true;
-  shard.targetX = e.clientX;
-  shard.targetY = e.clientY;
+
+  const x=e.clientX, y=e.clientY;
+
+  // Aim joystick (left-bottom)
+  if (!controls.aim.active && inCircle(x,y,controls.aim.x,controls.aim.y,controls.aim.r*1.15)) {
+    controls.aim.active = true;
+    controls.aim.pid = e.pointerId;
+    controls.aim.dx = 0; controls.aim.dy = 0;
+    shard.aimLocked = true;
+    return;
+  }
+
+  // Fire pad (right-bottom)
+  if (!controls.fire.active && inCircle(x,y,controls.fire.x,controls.fire.y,controls.fire.r*1.15)) {
+    controls.fire.active = true;
+    controls.fire.pid = e.pointerId;
+    controls.fire.held = true;
+    // Tap fires immediately (as fast as you click)
+    manualFireImmediate();
+    // Holding keeps firing (faster than auto-fire)
+    shard.fireCooldown = 0;
+    return;
+  }
+
+  // Two-finger pulse anywhere else
+  if (Object.keys(ptrs).length >= 2) { triggerPulse(); return; }
+
+  // Movement drag on playfield
+  if (!controls.move.active) {
+    controls.move.active = true;
+    controls.move.pid = e.pointerId;
+    controls.move.lastX = x; controls.move.lastY = y;
+    // Start with shard aiming direction as lead
+    controls.move.dirX = Math.cos(shard.aimAngle);
+    controls.move.dirY = Math.sin(shard.aimAngle);
+    shard.isDragged = true;
+    setShardTargetWithLead(x,y,0,0);
+  }
 }
 
 function onPM(e) {
   e.preventDefault();
-  if (!ptrs[e.pointerId]) return;
-  ptrs[e.pointerId].x = e.clientX;
-  ptrs[e.pointerId].y = e.clientY;
-  if (e.pointerId === dragPtrId && state===S.PLAY) {
+  const p = ptrs[e.pointerId];
+  if (!p) return;
+  p.x = e.clientX; p.y = e.clientY;
+
+  if (state !== S.PLAY) return;
+
+  const x=e.clientX, y=e.clientY;
+
+  // Aim joystick update
+  if (controls.aim.active && e.pointerId === controls.aim.pid) {
+    let dx = x - controls.aim.x;
+    let dy = y - controls.aim.y;
+    const len = Math.hypot(dx,dy) || 1;
+    // Clamp stick travel (feels like a real joystick)
+    const max = controls.aim.r*0.9;
+    const k = Math.min(1, max/len);
+    dx *= k; dy *= k;
+    controls.aim.dx = dx; controls.aim.dy = dy;
+
+    // If near center, keep last angle (reduces jitter)
+    if (Math.hypot(dx,dy) > 8) shard.aimAngle = Math.atan2(dy,dx);
+    return;
+  }
+
+  // Fire pad hold (no move needed)
+  if (controls.fire.active && e.pointerId === controls.fire.pid) {
+    // Allow slight drift while still holding (if finger slips)
+    const inside = inCircle(x,y,controls.fire.x,controls.fire.y,controls.fire.r*1.35);
+    controls.fire.held = inside;
+    return;
+  }
+
+  // Movement drag update
+  if (controls.move.active && e.pointerId === controls.move.pid) {
+    const dx = x - controls.move.lastX;
+    const dy = y - controls.move.lastY;
+    controls.move.lastX = x; controls.move.lastY = y;
+
+    // Update lead direction based on finger motion
+    const m = Math.hypot(dx,dy);
+    if (m > 0.5) {
+      controls.move.dirX = dx / m;
+      controls.move.dirY = dy / m;
+    }
+    setShardTargetWithLead(x,y,controls.move.dirX,controls.move.dirY);
     shard.isDragged = true;
-    shard.targetX = e.clientX;
-    shard.targetY = e.clientY;
   }
 }
 
 function onPU(e) {
   e.preventDefault();
-  const p = ptrs[e.pointerId];
-  if (p && state===S.PLAY && e.pointerId===dragPtrId) {
-    const dx = p.x-p.sx, dy = p.y-p.sy;
-    const len = Math.hypot(dx,dy);
-    if (len > 16) {
-      // Swipe direction = new aim angle
-      shard.aimAngle = Math.atan2(dy,dx);
-      shard.aimLocked = true;
-      tone(800,0.05,'square',0.07);
-    }
+  delete ptrs[e.pointerId];
+
+  if (controls.aim.active && e.pointerId === controls.aim.pid) {
+    controls.aim.active = false;
+    controls.aim.pid = null;
+    controls.aim.dx = 0; controls.aim.dy = 0;
+  }
+
+  if (controls.fire.active && e.pointerId === controls.fire.pid) {
+    controls.fire.active = false;
+    controls.fire.pid = null;
+    controls.fire.held = false;
+  }
+
+  if (controls.move.active && e.pointerId === controls.move.pid) {
+    controls.move.active = false;
+    controls.move.pid = null;
     shard.isDragged = false;
   }
-  if (e.pointerId===dragPtrId) dragPtrId=null;
-  delete ptrs[e.pointerId];
 }
 
 // Keyboard
@@ -258,25 +362,51 @@ window.addEventListener('keydown', e=>{
   keys[e.code]=true;
   if(e.code==='Space'){e.preventDefault();triggerPulse();}
   if(e.code==='KeyP') togglePause();
-  // Q/E to rotate aim
   if(e.code==='KeyQ'){shard.aimAngle-=0.15;shard.aimLocked=true;}
   if(e.code==='KeyE'){shard.aimAngle+=0.15;shard.aimLocked=true;}
 });
 window.addEventListener('keyup',e=>{keys[e.code]=false;});
 
 // ── PULSE BUTTON ────────────────────────────────────────────────────────────
+// Move pulse away from left joystick (top-left).
 const pulseBtn = document.createElement('button');
-pulseBtn.style.cssText='position:fixed;bottom:24px;left:24px;width:60px;height:60px;border-radius:50%;background:#2a2016;border:none;cursor:pointer;pointer-events:all;z-index:5;font-size:22px;color:#f5f0e8;box-shadow:3px 3px 0 rgba(0,0,0,0.3);';
+pulseBtn.style.cssText='position:fixed;top:18px;left:18px;width:56px;height:56px;border-radius:50%;background:#2a2016;border:none;cursor:pointer;pointer-events:all;z-index:5;font-size:22px;color:#f5f0e8;box-shadow:3px 3px 0 rgba(0,0,0,0.3);';
 pulseBtn.textContent='◎';
 pulseBtn.addEventListener('pointerdown',e=>{e.stopPropagation();triggerPulse();});
 document.body.appendChild(pulseBtn);
 
 const pauseBtn = document.createElement('button');
-pauseBtn.style.cssText='position:fixed;bottom:24px;right:24px;width:52px;height:52px;border-radius:4px;background:#2a2016;border:none;cursor:pointer;pointer-events:all;z-index:5;font-size:20px;color:#f5f0e8;box-shadow:3px 3px 0 rgba(0,0,0,0.3);';
+pauseBtn.style.cssText='position:fixed;top:18px;right:18px;width:52px;height:52px;border-radius:4px;background:#2a2016;border:none;cursor:pointer;pointer-events:all;z-index:5;font-size:20px;color:#f5f0e8;box-shadow:3px 3px 0 rgba(0,0,0,0.3);';
 pauseBtn.textContent='⏸';
 pauseBtn.addEventListener('pointerdown',e=>{e.stopPropagation();togglePause();});
 document.body.appendChild(pauseBtn);
 
+// ── CONTROL HELPERS ─────────────────────────────────────────────────────────
+function setShardTargetWithLead(px,py,dirX,dirY){
+  // Put shard slightly ahead of your thumb so the shard stays visible.
+  // Lead distance adapts a bit with screen size, clamped for consistency.
+  const lead = clamp(Math.min(W,H)*0.06, 22, 46);
+
+  // If direction is tiny, keep last known direction.
+  let lx = dirX, ly = dirY;
+  const ll = Math.hypot(lx,ly);
+  if (ll < 0.001) { lx = controls.move.dirX; ly = controls.move.dirY; }
+  else { lx/=ll; ly/=ll; }
+
+  shard.targetX = px + lx*lead;
+  shard.targetY = py + ly*lead;
+}
+
+// Manual fire triggered by tap on fire pad
+function manualFireImmediate(){
+  if(state!==S.PLAY) return;
+  // Fire immediately with no "cone check"
+  fireDart(shard.x, shard.y, shard.aimAngle);
+  if(upg.doubleDart) fireDart(shard.x, shard.y, shard.aimAngle+0.22);
+  tone(720,0.04,'square',0.07);
+}
+
+// ── PULSE ───────────────────────────────────────────────────────────────────
 function triggerPulse() {
   if(state!==S.PLAY||pulse.cd>0) return;
   pulse.cd = pulse.maxCd*upg.pulseCdMult;
@@ -357,6 +487,11 @@ function startGame(){
   shard.vx=0; shard.vy=0; shard.aimAngle=-Math.PI/2;
   shard.aimLocked=false; shard.fireCooldown=0; shard.rotation=0;
   shard.isDragged=false;
+
+  controls.aim.active=false; controls.aim.pid=null; controls.aim.dx=0; controls.aim.dy=0;
+  controls.fire.active=false; controls.fire.pid=null; controls.fire.held=false;
+  controls.move.active=false; controls.move.pid=null;
+
   upg={fireRate:1,dartSpeed:1,knockback:1,pulseCdMult:1,
     doubleDart:false,slowAura:false,pierce:false,
     ghostActive:false,ghostLife:0,ghostX:0,ghostY:0};
@@ -417,7 +552,7 @@ function update(dt){
   if(keys['KeyA']||keys['ArrowLeft'])  shard.vx-=km;
   if(keys['KeyD']||keys['ArrowRight']) shard.vx+=km;
 
-  // ── Drag follow
+  // ── Drag follow (with lead target)
   if(shard.isDragged){
     const dx=shard.targetX-shard.x, dy=shard.targetY-shard.y;
     shard.vx=lerp(shard.vx,dx*20,0.38);
@@ -427,6 +562,7 @@ function update(dt){
     const fric=Math.pow(0.85,dt/0.016);
     shard.vx*=fric; shard.vy*=fric;
   }
+
   // Speed cap
   const spd2=Math.hypot(shard.vx,shard.vy);
   if(spd2>580){shard.vx=shard.vx/spd2*580;shard.vy=shard.vy/spd2*580;}
@@ -443,7 +579,7 @@ function update(dt){
   // Visual rotation follows velocity
   if(spd2>8) shard.rotation=lerp(shard.rotation,Math.atan2(shard.vy,shard.vx),0.14);
 
-  // Auto-aim if not locked
+  // Auto-aim if not locked (still works if you never touch the aim joystick)
   if(!shard.aimLocked){
     const ne=nearestEnemy(shard.x,shard.y);
     if(ne) shard.aimAngle=Math.atan2(ne.y-shard.y,ne.x-shard.x);
@@ -454,15 +590,30 @@ function update(dt){
   pulse.rings.forEach(r=>{r.r+=195*dt;});
   pulse.rings=pulse.rings.filter(r=>r.r<r.maxR);
 
-  // Auto-fire
+  // ── Firing logic
+  // 1) If holding the fire pad: fire continuously (fast).
+  // 2) Otherwise: default auto-fire (forgiving, won't require holding).
   shard.fireCooldown-=dt;
+
+  const holdingFire = controls.fire.held && controls.fire.active;
+
   if(shard.fireCooldown<=0){
-    const hasTarget=shard.aimLocked||enemyInCone(shard.x,shard.y,shard.aimAngle,Math.PI*65/180,370);
-    if(hasTarget){
+    if(holdingFire){
       fireDart(shard.x,shard.y,shard.aimAngle);
       if(upg.doubleDart) fireDart(shard.x,shard.y,shard.aimAngle+0.22);
-      shard.fireCooldown=shard.fireRate*upg.fireRate;
-      tone(700,0.04,'square',0.06);
+      shard.fireCooldown = Math.max(0.06, shard.fireRate*upg.fireRate*0.32);
+      tone(700,0.035,'square',0.055);
+    } else {
+      const hasTarget=shard.aimLocked||enemyInCone(shard.x,shard.y,shard.aimAngle,Math.PI*65/180,370);
+      if(hasTarget){
+        fireDart(shard.x,shard.y,shard.aimAngle);
+        if(upg.doubleDart) fireDart(shard.x,shard.y,shard.aimAngle+0.22);
+        shard.fireCooldown=shard.fireRate*upg.fireRate;
+        tone(680,0.04,'square',0.055);
+      } else {
+        // No target → don't spam; check again soon
+        shard.fireCooldown = 0.08;
+      }
     }
   }
 
@@ -697,7 +848,68 @@ function render(){
     ctx.restore();
   });
 
+  // On-screen controls overlay (subtle paper-cut style)
+  drawControls();
+
   drawHUD();
+  ctx.restore();
+}
+
+function drawControls(){
+  // Only in PLAY; keep subtle so it doesn't clutter desktop.
+  if(state!==S.PLAY) return;
+
+  // Aim joystick base
+  drawPad(controls.aim.x, controls.aim.y, controls.aim.r, 'Aim');
+  const kx = controls.aim.x + controls.aim.dx;
+  const ky = controls.aim.y + controls.aim.dy;
+  drawKnob(kx, ky, controls.aim.r*0.36);
+
+  // Fire pad base
+  drawPad(controls.fire.x, controls.fire.y, controls.fire.r, 'Fire');
+  // A little "string" notch
+  ctx.save();
+  ctx.globalAlpha = controls.fire.held ? 0.85 : 0.55;
+  ctx.strokeStyle = 'rgba(42,32,22,0.55)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(controls.fire.x, controls.fire.y, controls.fire.r*0.55, -0.45, 0.45);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPad(x,y,r,label){
+  ctx.save();
+  // Shadow
+  ctx.globalAlpha=0.18;
+  ctx.fillStyle='#2a2016';
+  ctx.beginPath(); ctx.arc(x+2,y+3,r,0,Math.PI*2); ctx.fill();
+  // Base
+  ctx.globalAlpha=0.16;
+  ctx.fillStyle='#2a2016';
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+  // Rim
+  ctx.globalAlpha=0.35;
+  ctx.strokeStyle='rgba(42,32,22,0.55)';
+  ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  // Label
+  ctx.globalAlpha=0.55;
+  ctx.fillStyle='#2a2016';
+  ctx.font=`${clamp(W*0.022,10,14)}px Georgia,serif`;
+  ctx.textAlign='center';
+  ctx.fillText(label,x,y+r+16);
+  ctx.restore();
+}
+function drawKnob(x,y,r){
+  ctx.save();
+  ctx.globalAlpha=0.55;
+  ctx.fillStyle='#2a2016';
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+  ctx.globalAlpha=0.55;
+  ctx.strokeStyle='rgba(255,245,225,0.55)';
+  ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
   ctx.restore();
 }
 
@@ -706,12 +918,10 @@ function drawAimLine(){
   const ax=shard.x+Math.cos(shard.aimAngle)*len;
   const ay=shard.y+Math.sin(shard.aimAngle)*len;
   ctx.save();
-  // Dashed aim line
   ctx.strokeStyle=shard.aimLocked?'rgba(200,80,50,0.55)':'rgba(42,32,22,0.28)';
   ctx.lineWidth=1.5; ctx.setLineDash([5,5]);
   ctx.lineDashOffset=-elapsed*14;
   ctx.beginPath(); ctx.moveTo(shard.x,shard.y); ctx.lineTo(ax,ay); ctx.stroke();
-  // Arrowhead
   ctx.setLineDash([]);
   ctx.fillStyle=shard.aimLocked?'rgba(200,80,50,0.7)':'rgba(42,32,22,0.5)';
   ctx.translate(ax,ay); ctx.rotate(shard.aimAngle);
@@ -791,17 +1001,18 @@ function drawHUD(){
   ctx.font=`${clamp(W*0.025,11,15)}px Georgia,serif`;
   ctx.fillText(`wave ${waveStage+1}`,W-16,46);
   ctx.textAlign='left';
-  // Aim hint
+
   ctx.font=`${clamp(W*0.025,10,13)}px Georgia,serif`;
   ctx.fillStyle='rgba(42,32,22,0.35)';
-  const hint=shard.aimLocked?'Aim locked  ·  Swipe to redirect':'Auto-aim  ·  Swipe to lock direction';
+  const hint=shard.aimLocked?'Aim joystick · fire pad for burst':'Auto-aim  ·  touch Aim to lock';
   ctx.fillText(hint,14,H-92);
-  // Pulse cooldown arc
+
+  // Pulse cooldown arc (top-left, around pulse button position)
   const maxCd=pulse.maxCd*upg.pulseCdMult, frac=pulse.cd/maxCd;
   if(frac>0){
     ctx.save();
     ctx.strokeStyle='rgba(245,240,232,0.85)'; ctx.lineWidth=3; ctx.lineCap='round';
-    ctx.beginPath(); ctx.arc(24+30,H-24-30,28,-Math.PI/2,-Math.PI/2+Math.PI*2*(1-frac)); ctx.stroke();
+    ctx.beginPath(); ctx.arc(18+28,18+28,26,-Math.PI/2,-Math.PI/2+Math.PI*2*(1-frac)); ctx.stroke();
     ctx.restore();
   }
 }
@@ -819,6 +1030,7 @@ function loop(ts){
   render();
 }
 requestAnimationFrame(ts=>{lastT=ts;requestAnimationFrame(loop);});
+
 </script>
 </body>
 </html>
